@@ -25,6 +25,21 @@ static int verbose_flag;
 
 static double magicnum = .9280; // scaling for theta-lens .8875 .9170 .9260
 
+/** Kodak SP360 4k full 4k frame
+static double FOV = 235.0 * M_PI / 180.0;
+// The width of the fisheye image as a percentage of the video frame width
+static double lens_scale = 0.97;
+static double x_shift = 0;
+static double y_shift = 0;
+*/
+
+/** Kodak SP360 4k HDMI 1080p frame */
+static double FOV = 235.0 * M_PI / 180.0;
+// The width of the fisheye image as a percentage of the video frame width
+static double lens_scale = 0.60;
+static double x_shift = 0;
+static double y_shift = 0;
+
 typedef struct double2 {
   double x;
   double y;
@@ -339,28 +354,37 @@ int ppmWrite_ASCII(char* filename, int rows, int cols, int **image1, int **image
  * then those to the polar projection and then pass the polar system to cardinal x’,y’.
  */
 double2 evaluatePixel_Front(double2 outPos, double2 srcSize) {
-  double theta, phi;
-  double3 sphericCoords;
-  double phi2_over_pi;
+  double theta, phi, phi2;
+  double x, y, z;
   double theta2;
   double2 inCentered;
+  int lens = 0;
+  double adj;
+  double radius;
 
-  // Convert outcoords to radians (180 = pi, so half a sphere)
-  theta = (1.0 - outPos.x) * M_PI; 
-  phi = outPos.y * M_PI;
+  // Convert outcoords to radians on the sphere.
+  // Center the frame on 180 degrees and adjust the angles to account for the FOV of the lens
+  theta = (2.0 * outPos.x * M_PI - M_PI);
+  phi = (outPos.y * M_PI - M_PI_2);
+  
+  // Convert outcoords to coordinates on a unit sphere
+  x = sin(theta) * cos(phi);
+  y = -sin(phi);
+  z = cos(theta) * cos(phi);
 
-  // Convert outcoords to spherical (x,y,z on unisphere)
-  sphericCoords.x = cos(theta) * sin(phi);
-  sphericCoords.y = sin(theta) * sin(phi);
-  sphericCoords.z = cos(phi);
-    
-  // Convert spherical to input coordinates...
-  theta2 = atan2(-sphericCoords.z, sphericCoords.x);
-  phi2_over_pi = acos(sphericCoords.y) / M_PI;
+  // Convert to spherical with respect to the lens
+  theta2 = atan2(y, x);
+  adj = sqrt(x * x + y * y);
+  phi2 = atan2(adj, z);
+  radius = phi2 / FOV;
+  if (radius <= 0.5) {
+    inCentered.x = (radius * sin(theta2) * lens_scale + 0.5) * srcSize.x;
+    inCentered.y = (radius * cos(theta2) * lens_scale + 0.5) * srcSize.y;
+  } else {
+    inCentered.x = 0;
+    inCentered.y = 0;
+  }
 
-  inCentered.x = (phi2_over_pi * cos(theta2) + 0.5) * srcSize.x;
-  inCentered.y = (phi2_over_pi * sin(theta2) + 0.5) * srcSize.y;
-    
   return inCentered;
 }
 
