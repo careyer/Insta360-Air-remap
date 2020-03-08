@@ -23,8 +23,6 @@
 /* Flag set by ‘--verbose’. */
 static int verbose_flag;
 
-static double magicnum = .9280; // scaling for theta-lens .8875 .9170 .9260
-
 typedef struct double2 {
   double x;
   double y;
@@ -68,6 +66,11 @@ typedef struct configuration {
   int width_set;
   int crop;
   enum CameraMode mode;
+  double fov;
+  double scale_x;
+  double scale_y;
+  double shift_x;
+  double shift_y;
 } configuration;
 
 /* Store command line options in configuration */
@@ -86,6 +89,11 @@ configuration parse_options(int argc, char **argv) {
   po.height_set = 0;
   po.width_set = 0;
   po.mode = THETAS; // default
+  po.fov = 180.0;
+  po.scale_x = 1.0;
+  po.scale_y = 1.0;
+  po.shift_x = 0.0;
+  po.shift_y = 0.0;
 
   while (1) {
   
@@ -108,6 +116,11 @@ configuration parse_options(int argc, char **argv) {
       {"width",   required_argument, 0, 'w'}, // source
       {"mode",    required_argument, 0, 'm'},
       {"crop",    required_argument, 0, 'b'},
+      {"fov",     required_argument, 0, 'f'},
+      {"xscale",  required_argument, 0, 's'},
+      {"yscale",  required_argument, 0, 'S'},
+      {"xshift",  required_argument, 0, 'X'},
+      {"yshift",  required_argument, 0, 'Y'},
 
       {0, 0, 0, 0}
   };
@@ -180,12 +193,47 @@ configuration parse_options(int argc, char **argv) {
         }
         break;
 
+      case 'f':
+        po.fov = (double)atoi(optarg) * M_PI / 180.0;
+        break;
+
+      case 's':
+        po.scale_x = atof(optarg);
+        break;
+
+      case 'S':
+        po.scale_y = atof(optarg);
+        break;
+
+      case 'X':
+        po.shift_x = atof(optarg);
+        break;
+
+      case 'Y':
+        po.shift_y = atof(optarg);
+        break;
+
     /* getopt_long already printed an error message. */
       case '?':
       
       case 'q':
-        printf ("Usage: %s -x|--xmap FILE_x.pgm -y|--ymap FILE_y.pgm -h|--height 300 -w|--width 400 -r|--rows 600 -c|--cols 800 \n", argv[0]);
-        printf ("h,w is source size, r,c is targetsize \n");
+        printf ("Usage: %s \n");
+        printf ("  -x|--xmap FILE_x.pgm\n");
+        printf ("  -y|--ymap FILE_y.pgm\n");
+        printf ("  -h|--height 300\n");
+        printf ("  -w|--width 400\n");
+        printf ("  -r|--rows 600\n");
+        printf ("  -c|--cols 800 \n");
+        printf ("  -f|--fov 180 \n");
+        printf ("  -s|--scalex 0.6 \n");
+        printf ("  -S|--scaley 1.0 \n");
+        printf ("  -X|--shiftx 0.0 \n");
+        printf ("  -y|--shifty 0.0 \n");
+        printf ("h,w is source size, r,c is targetsize, scale and shift are all 0.0-1.0\n");
+        printf ("\nExamples:\n");
+        printf ("Insta360 Air 2560x1280: ./project -x xmap.pgm -y ymap.pgm -h 1280 -w 1280 -c 2560 -r 1280 -m theta -s 0.98 -S 0.98\n");
+        printf ("Kodak SP360 4k 1440x1440: ./project -x xmap.pgm -y ymap.pgm -h 1440 -w 1440 -c 2560 -r 1440 -m front -f 235 -s 0.97 -S 0.97\n");
+        printf ("Kodak SP360 4k 1080p HDMI: ./project -x xmap.pgm -y ymap.pgm -h 1080 -w 1920 -c 1920 -r 1080 -m front -f 235 -s 0.57 -S 1.0\n");
         exit(1);
         break;
 
@@ -333,34 +381,43 @@ int ppmWrite_ASCII(char* filename, int rows, int cols, int **image1, int **image
   return(1);
 }
 
+int is_close(double v, double t, double e) {
+  return fabs(v - t) < e;
+}
+
 /* So, to get the x’,y’ position for the circular image we will have to first pass the 
  * coordinates x,y from the rectangular output image to spherical coordinates using the
  * first coordinate system, then those to the second shown spherical coordinate system, 
  * then those to the polar projection and then pass the polar system to cardinal x’,y’.
  */
-double2 evaluatePixel_Front(double2 outPos, double2 srcSize) {
-  double theta, phi;
-  double3 sphericCoords;
-  double phi2_over_pi;
-  double theta2;
+double2 evaluatePixel_Front(configuration cfg, double2 outPos, double2 srcSize) {
+  double theta, phi, phi2, theta2;
+  double x, y, z;
   double2 inCentered;
+  double radius;
 
-  // Convert outcoords to radians (180 = pi, so half a sphere)
-  theta = (1.0 - outPos.x) * M_PI; 
-  phi = outPos.y * M_PI;
+  // Convert outcoords to radians on the sphere.
+  // Center the frame on 180 degrees and adjust the angles to account for the FOV of the lens
+  theta = (2.0 * outPos.x * M_PI - M_PI);
+  phi = (outPos.y * M_PI - M_PI_2);
 
-  // Convert outcoords to spherical (x,y,z on unisphere)
-  sphericCoords.x = cos(theta) * sin(phi);
-  sphericCoords.y = sin(theta) * sin(phi);
-  sphericCoords.z = cos(phi);
-    
-  // Convert spherical to input coordinates...
-  theta2 = atan2(-sphericCoords.z, sphericCoords.x);
-  phi2_over_pi = acos(sphericCoords.y) / M_PI;
+  // Convert outcoords to coordinates on a unit sphere
+  x = sin(theta) * cos(phi);
+  y = -sin(phi);
+  z = cos(theta) * cos(phi);
 
-  inCentered.x = (phi2_over_pi * cos(theta2) + 0.5) * srcSize.x;
-  inCentered.y = (phi2_over_pi * sin(theta2) + 0.5) * srcSize.y;
-    
+  // Convert to spherical with respect to the lens
+  theta2 = atan2(y, x);
+  phi2 = atan2(sqrt(x * x + y * y), z);
+  radius = phi2 / cfg.fov;
+  if (radius <= 0.5) {
+    inCentered.x = (radius * sin(theta2) * cfg.scale_x + 0.5 + cfg.shift_x) * srcSize.x;
+    inCentered.y = (radius * cos(theta2) * cfg.scale_y + 0.5 + cfg.shift_y) * srcSize.y;
+  } else {
+    inCentered.x = 0;
+    inCentered.y = 0;
+  }
+
   return inCentered;
 }
 
@@ -369,7 +426,7 @@ double2 evaluatePixel_Front(double2 outPos, double2 srcSize) {
  * first coordinate system, then those to the second shown spherical coordinate system, 
  * then those to the polar projection and then pass the polar system to cardinal x’,y’.
  */
-double2 evaluatePixel_Theta(double2 outPos, double2 srcSize) {
+double2 evaluatePixel_Theta(configuration cfg, double2 outPos, double2 srcSize) {
   double theta, phi;
   double3 sphericCoords;
   double phi2_over_pi;
@@ -398,8 +455,8 @@ double2 evaluatePixel_Theta(double2 outPos, double2 srcSize) {
   phi2_over_pi = acos(sphericCoords.y) / M_PI;
   //phi2_over_pi = sphericCoords.y;
   //###
-  inCentered.x = (phi2_over_pi * cos(theta2) * magicnum + 0.5102 + lens) * srcSize.x;
-  inCentered.y = (phi2_over_pi * sin(theta2) * magicnum + 0.4990) * srcSize.y;
+  inCentered.x = (phi2_over_pi * cos(theta2) * cfg.scale_x + 0.5102 + lens) * srcSize.x;
+  inCentered.y = (phi2_over_pi * sin(theta2) * cfg.scale_y + 0.4990) * srcSize.y;
   
   return inCentered;
 }
@@ -453,10 +510,10 @@ void gen_maps(configuration cfg, int** image_x, int** image_y) {
     // Map output pixel (x, y) to corresponding input pixel
     switch (cfg.mode) {
       case FRONT:       
-      o = evaluatePixel_Front(outPos, srcSize); 
+      o = evaluatePixel_Front(cfg, outPos, srcSize); 
       break;
       case THETAS:       
-      o = evaluatePixel_Theta(outPos, srcSize); 
+      o = evaluatePixel_Theta(cfg, outPos, srcSize); 
       break;
       case EQUIRECTANGULAR: 
       o = evaluatePixel_Equirectangular(outPos, srcSize); 
